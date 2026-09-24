@@ -65,7 +65,7 @@ endfunc
 
 function AcmeStatusName()
 	let b = bufnr()
-	if term_getstatus(b) != ''
+	if s:TermStatus(b) != ''
 		return '%{AcmeStatusDir()}%F '
 	elseif has_key(s:scratch, b)
 		return '%{AcmeStatusTitle()}'
@@ -106,11 +106,11 @@ function s:RemoveJob(i, status)
 	else
 		checktime
 		call s:ReloadDirs()
-		let sig = job_info(job.h).termsig
+		let sig = s:JobInfo(job.h).termsig
 		if a:status == 0
 			echo 'Done:' job.cmd
 		elseif sig != '' && !job.killed
-			let name = bufname(ch_getbufnr(job.h, 'out'))
+			let name = bufname(s:JobBufNr(job.h))
 			call s:ErrorOpen(name, [toupper(sig).': '.job.cmd])
 		endif
 	endif
@@ -127,11 +127,13 @@ endfunc
 
 function s:Kill(p)
 	for job in s:Jobs(a:p)
-		let ch = job_getchannel(job.h)
-		if string(ch) != 'channel fail'
-			call ch_close(ch)
+		if !has('nvim')
+			let ch = job_getchannel(job.h)
+			if string(ch) != 'channel fail'
+				call ch_close(ch)
+			endif
 		endif
-		call job_stop(job.h)
+		call s:JobStop(job.h)
 		let job.killed = 1
 	endfor
 endfunc
@@ -141,6 +143,47 @@ command -nargs=? K call s:Kill(<q-args> != '' ? <q-args> : bufnr())
 function s:Expand(s)
 	return substitute(a:s, '\v^\t+',
 		\ '\=repeat(" ", len(submatch(0)) * 8)', '')
+endfunc
+
+function s:TermStatus(b)
+	if !has('nvim')
+		return term_getstatus(a:b)
+	elseif getbufvar(a:b, '&buftype') != 'terminal'
+		return ''
+	endif
+	let job = getbufvar(a:b, 'terminal_job_id', 0)
+	let status = job > 0 && jobwait([job], 0)[0] == -1
+		\ ? 'running' : 'finished'
+	if status == 'running' && (a:b != bufnr() || mode() != 't')
+		let status .= ',normal'
+	endif
+	return status
+endfunc
+
+function s:TermJob(b)
+	return has('nvim') ? getbufvar(a:b, 'terminal_job_id', 0) : term_getjob(a:b)
+endfunc
+
+function s:TermAltScreen(b)
+	" Neovim does not expose whether its terminal is using the alternate screen.
+	return has('nvim') ? 0 : term_getaltscreen(a:b)
+endfunc
+
+function s:NvimTermExit(b, job, status, event)
+	if bufexists(a:b)
+		call timer_start(0, {_ -> execute('silent! bdelete! '.a:b)})
+	endif
+endfunc
+
+function s:TermStart(cmd, opts)
+	if !has('nvim')
+		return term_start(a:cmd, a:opts)
+	endif
+	let opts = {'term': v:true, 'cwd': get(a:opts, 'cwd', getcwd())}
+	if get(a:opts, 'term_finish', '') == 'close'
+		let opts.on_exit = function('s:NvimTermExit', [bufnr()])
+	endif
+	return jobstart(s:Argv(a:cmd), opts)
 endfunc
 
 function s:Send(w, inp)
@@ -154,10 +197,10 @@ function s:Send(w, inp)
 			call win_execute(a:w, 'normal! G')
 		endif
 		let job = s:Jobs(b)[0].h
-		call ch_setoptions(job, {'callback': ''})
-		call ch_sendraw(job, join(inp, "\n")."\n")
+		call s:ChanSetCallback(job, '')
+		call s:ChanSend(job, join(inp, "\n")."\n")
 	else
-		if term_getstatus(b) =~ '\v<normal>'
+		if s:TermStatus(b) =~ '\v<normal>'
 			if a:w == win_getid()
 				exe 'norm! i'
 			else
@@ -168,12 +211,12 @@ function s:Send(w, inp)
 		if a:inp[-1:] == "\n"
 			let inp .= "\r"
 		endif
-		call ch_sendraw(term_getjob(b), inp)
+		call s:ChanSend(s:TermJob(b), inp)
 	endif
 endfunc
 
 function s:Receiver(b)
-	return term_getstatus(a:b) =~ 'running' ||
+	return s:TermStatus(a:b) =~ 'running' ||
 		\ (has_key(s:scratch, a:b) && s:Jobs(a:b) != [])
 endfunc
 
@@ -193,6 +236,110 @@ function s:ArgvAxec(cmd, cwd)
 	let argv = s:Argv(a:cmd)
 	return filereadable(a:cwd.'/.env.sh') || filereadable(a:cwd.'/x/env.sh')
 		\ ? [s:avimdir.'/bin/axec'] + argv : argv
+endfunc
+
+function s:JobStop(job)
+	if has('nvim')
+		call jobstop(a:job)
+	else
+		call job_stop(a:job)
+	endif
+endfunc
+
+function s:ChanSend(job, data)
+	if has('nvim')
+		call chansend(a:job, a:data)
+	else
+		call ch_sendraw(a:job, a:data)
+	endif
+endfunc
+
+function s:ChanSetCallback(job, callback)
+	if has('nvim')
+		if has_key(s:nvim_jobs, a:job)
+			let s:nvim_jobs[a:job].callback = a:callback
+		endif
+	else
+		call ch_setoptions(a:job, {'callback': a:callback})
+	endif
+endfunc
+
+function s:JobInfo(job)
+	if !has('nvim')
+		return job_info(a:job)
+	endif
+	let status = get(get(s:nvim_jobs, a:job, {}), 'status', -1)
+	let signals = {129: 'hup', 130: 'int', 143: 'term'}
+	let sig = status > 128 ? get(signals, status, 'sig'.(status - 128)) : ''
+	return {'termsig': sig}
+endfunc
+
+function s:JobBufNr(job)
+	return has('nvim')
+		\ ? get(get(s:nvim_jobs, a:job, {}), 'buf', -1)
+		\ : ch_getbufnr(a:job, 'out')
+endfunc
+
+function s:NvimOut(job, data, event)
+	if empty(a:data) || a:data == ['']
+		return
+	endif
+	let meta = get(s:nvim_jobs, a:job, {})
+	let b = get(meta, 'buf', -1)
+	if bufexists(b)
+		let modifiable = getbufvar(b, '&modifiable')
+		call setbufvar(b, '&modifiable', 1)
+		let data = copy(a:data)
+		let last = getbufline(b, '$')[0]
+		let data[0] = last . data[0]
+		call setbufline(b, '$', data[0])
+		if len(data) > 1
+			call appendbufline(b, '$', data[1:])
+		endif
+		call setbufvar(b, '&modifiable', modifiable)
+	endif
+	if !empty(get(meta, 'callback', ''))
+		call call(meta.callback, [a:job, ''])
+	endif
+endfunc
+
+function s:NvimExit(job, status, event)
+	if !has_key(s:nvim_jobs, a:job)
+		return
+	endif
+	let s:nvim_jobs[a:job].status = a:status
+	try
+		call s:Exited(a:job, a:status)
+	finally
+		call remove(s:nvim_jobs, a:job)
+	endtry
+endfunc
+
+function s:JobStartNvim(cmd, outb, ctxb, opts, inp)
+	let cwd = get(a:opts, 'cwd', getcwd())
+	let opts = {
+		\ 'cwd': cwd,
+		\ 'env': s:JobEnv(a:outb),
+		\ 'on_exit': function('s:NvimExit'),
+		\ 'on_stdout': function('s:NvimOut'),
+		\ 'on_stderr': function('s:NvimOut'),
+	\ }
+	let job = jobstart(s:ArgvAxec(a:cmd, cwd), opts)
+	if job <= 0
+		return
+	endif
+	let s:nvim_jobs[job] = {
+		\ 'buf': a:outb,
+		\ 'callback': get(a:opts, 'callback', ''),
+		\ 'status': -1,
+	\ }
+	call s:Started(job, s:BufWin(a:outb) != 0 ? a:outb : a:ctxb, a:cmd)
+	if a:inp != ''
+		call chansend(job, a:inp)
+		call chanclose(job, 'stdin')
+	elseif get(a:opts, 'in_io', '') == 'null'
+		call chanclose(job, 'stdin')
+	endif
 endfunc
 
 function s:JobEnv(buf)
@@ -216,6 +363,9 @@ function s:SetEnv(env)
 endfunc
 
 function s:JobStart(cmd, outb, ctxb, opts, inp)
+	if has('nvim')
+		return s:JobStartNvim(a:cmd, a:outb, a:ctxb, a:opts, a:inp)
+	endif
 	let opts = {
 		\ 'exit_cb': 's:Exited',
 		\ 'err_io': 'out',
@@ -283,7 +433,7 @@ function s:ErrorOpen(name, ...)
 		exe w.'wincmd w'
 		let b = s:ErrorLoad(a:name)
 		for job in s:jobs
-			if ch_getbufnr(job.h, 'out') == b && job.buf != b
+			if s:JobBufNr(job.h) == b && job.buf != b
 				let job.buf = b
 			endif
 		endfor
@@ -303,7 +453,7 @@ endfunc
 
 function s:ErrorCb(b, ch, msg)
 	call s:ErrorOpen(bufname(a:b))
-	call ch_setoptions(a:ch, {'callback': ''})
+	call s:ChanSetCallback(a:ch, '')
 endfunc
 
 function s:ErrorExec(cmd, dir, b, inp)
@@ -384,7 +534,7 @@ endfunc
 
 function s:InsTerms()
 	for w in s:escterms
-		if term_getstatus(winbufnr(w)) =~ '\v<normal>'
+		if s:TermStatus(winbufnr(w)) =~ '\v<normal>'
 			call win_execute(w, 'norm! i')
 		endif
 	endfor
@@ -397,7 +547,7 @@ function s:Term(cmd)
 		let opts.term_finish = 'close'
 	endif
 	call s:New('')
-	call term_start(a:cmd != '' ? a:cmd : $SHELL, opts)
+	call s:TermStart(a:cmd != '' ? a:cmd : $SHELL, opts)
 	let s:cwd[bufnr()] = opts.cwd
 endfunc
 
@@ -427,7 +577,7 @@ function s:ScratchCb(b, ch, msg)
 		let w = win_getid(w)
 		if line('$', w) > 1
 			call win_execute(w, 'noa normal! gg0')
-			call ch_setoptions(a:ch, {'callback': ''})
+			call s:ChanSetCallback(a:ch, '')
 		endif
 	endif
 endfunc
@@ -446,11 +596,15 @@ function s:ScratchExec(cmd, dir, inp, title)
 endfunc
 
 function s:Exec(cmd)
-	silent! call job_start(s:Argv(a:cmd), {
-		\ 'err_io': 'null',
-		\ 'in_io': 'null',
-		\ 'out_io': 'null',
-	\ })
+	if has('nvim')
+		silent! call jobstart(s:Argv(a:cmd), {'detach': 1})
+	else
+		silent! call job_start(s:Argv(a:cmd), {
+			\ 'err_io': 'null',
+			\ 'in_io': 'null',
+			\ 'out_io': 'null',
+		\ })
+	endif
 endfunc
 
 function s:BufWidth(b)
@@ -492,7 +646,10 @@ function s:ListDir()
 	if !isdirectory(dir) || !&modifiable
 		return
 	endif
-	let lst = ['..'] + readdir(dir, 1, {'sort': 'collate'})
+	let entries = has('nvim')
+		\ ? readdir(dir, 1)
+		\ : readdir(dir, 1, {'sort': 'collate'})
+	let lst = ['..'] + entries
 	call map(lst, 'isdirectory(dir."/".v:val) ? v:val."/" : v:val')
 	let width = s:BufWidth(bufnr())
 	let lst = s:Columnate(lst, width)
@@ -886,11 +1043,16 @@ function AcmeClick()
 	if s:clickstatus != 0 || s:click.winid == 0
 		return
 	endif
-	exe "normal! \<LeftMouse>"
+	if has('nvim')
+		call win_gotoid(s:click.winid)
+		call cursor(s:click.line, s:click.column)
+	else
+		exe "normal! \<LeftMouse>"
+	endif
 	let s:visual = s:SaveVisual()
 	let s:clicksel = s:clickmode == 'v' && win_getid() == s:clickwin &&
 		\ s:InSel()
-	if term_getstatus(bufnr()) == 'running'
+	if s:TermStatus(bufnr()) == 'running'
 		call add(s:escterms, win_getid())
 		call feedkeys("\<C-w>N\<LeftMouse>", 'in')
 	endif
@@ -915,7 +1077,9 @@ function s:MiddleRelease(click)
 			exe win_id2win(p.winid).'close!'
 		endif
 	else
-		exe "normal! \<LeftRelease>"
+		if !has('nvim')
+			exe "normal! \<LeftRelease>"
+		endif
 		let cmd = a:click <= 0 || s:clicksel
 			\ ? s:Sel()[0] : expand('<cWORD>')
 		let vis = s:clickmode == 'v' && (a:click <= 0 || !s:clicksel)
@@ -960,7 +1124,9 @@ function s:RightRelease(click)
 			call s:Minimize(p.winid)
 		endif
 	else
-		exe "normal! \<LeftRelease>"
+		if !has('nvim')
+			exe "normal! \<LeftRelease>"
+		endif
 		let click = s:clicksel ? -1 : a:click
 		let txt = click <= 0
 			\ ? trim(s:Sel()[0], "\r\n", 2) : getline('.')
@@ -976,7 +1142,7 @@ endfunc
 function s:TermLeftMouse()
 	call s:PreClick('t')
 	if s:clickstatus == 0 && s:clickwin == s:click.winid &&
-		\ !term_getaltscreen(bufnr())
+		\ !s:TermAltScreen(bufnr())
 		return "\<C-w>N\<LeftMouse>"
 	else
 		return "\<LeftMouse>"
@@ -984,9 +1150,11 @@ function s:TermLeftMouse()
 endfunc
 
 function s:TermLeftRelease()
-	exe "normal! \<LeftRelease>"
+	if !has('nvim')
+		exe "normal! \<LeftRelease>"
+	endif
 	if line('.') == line('$') && charcol('.') + 1 == charcol('$') &&
-		\ term_getstatus(bufnr()) != 'finished'
+		\ s:TermStatus(bufnr()) != 'finished'
 		normal! i
 	endif
 endfunc
@@ -994,7 +1162,7 @@ endfunc
 function s:TermMiddleMouse()
 	call s:PreClick('t')
 	if s:clickstatus == 0 && s:clickwin == s:click.winid &&
-		\ term_getaltscreen(bufnr())
+		\ s:TermAltScreen(bufnr())
 		return "\<MiddleMouse>"
 	else
 		call add(s:escterms, win_getid())
@@ -1005,7 +1173,7 @@ endfunc
 function s:TermRightMouse()
 	call s:PreClick('t')
 	if s:clickstatus == 0 && s:clickwin == s:click.winid &&
-		\ term_getaltscreen(bufnr())
+		\ s:TermAltScreen(bufnr())
 		return "\<RightMouse>"
 	else
 		call add(s:escterms, win_getid())
@@ -1054,7 +1222,7 @@ function s:Clear(b)
 	if has_key(s:scratch, a:b)
 		let s:scratch[a:b].cleared = 1
 		for job in s:Jobs(a:b)
-			call ch_setoptions(job.h, {'callback': ''})
+			call s:ChanSetCallback(job.h, '')
 		endfor
 	endif
 endfunc
@@ -1140,7 +1308,7 @@ function s:Look(p)
 	let keys = ":let v:hlsearch=".hl."\<CR>"
 	if mode() == 'i'
 		let keys = "\<C-o>".keys
-	elseif term_getstatus(bufnr()) == 'running'
+	elseif s:TermStatus(bufnr()) == 'running'
 		let keys = "\<C-w>N".keys."i"
 	endif
 	call feedkeys(keys, 'n')
@@ -1218,7 +1386,7 @@ function s:CtrlRecv(ch, data)
 endfunc
 
 function s:CtrlSend(msg)
-	call ch_sendraw(s:ctrl, join(a:msg, "\x1f") . "\x1e")
+	call s:ChanSend(s:ctrl, join(a:msg, "\x1f") . "\x1e")
 endfunc
 
 function s:BufWinLeave()
@@ -1238,7 +1406,7 @@ function s:BufWinLeave()
 		endfor
 		call timer_start(0, {_ -> execute('silent! bdelete '.b)})
 	endif
-	if term_getstatus(b) != ''
+	if s:TermStatus(b) != ''
 		call timer_start(0, {_ -> execute('silent! bdelete! '.b)})
 	endif
 endfunc
@@ -1262,8 +1430,13 @@ au!
 au BufEnter * call s:ListDir()
 au BufWinLeave * call s:BufWinLeave()
 au FocusGained * call s:ReloadDirs()
-au TerminalOpen * nnoremap <buffer> <silent> <LeftRelease>
-	\ :call <SID>TermLeftRelease()<CR>
+if has('nvim')
+	au TermOpen * nnoremap <buffer> <silent> <LeftRelease>
+		\ :call <SID>TermLeftRelease()<CR>
+else
+	au TerminalOpen * nnoremap <buffer> <silent> <LeftRelease>
+		\ :call <SID>TermLeftRelease()<CR>
+endif
 au TextChanged,TextChangedI guide setl nomodified
 au VimEnter * call s:ReloadDirs(winnr())
 au VimResized * call s:ReloadDirs(0)
@@ -1292,14 +1465,24 @@ let s:editcmds = {}
 let s:escterms = []
 let s:jobs = []
 let s:minimized = {}
+let s:nvim_jobs = {}
 let s:scratch = {}
 let s:tops = 1
 
 if s:ctrlexe != ''
-	let s:ctrl = job_start([s:ctrlexe], {
-		\ 'callback': 's:CtrlRecv',
-		\ 'err_io': 'null',
-		\ 'mode': 'raw',
-	\ })
+	if has('nvim')
+		function s:NvimCtrlRecv(job, data, event)
+			call s:CtrlRecv(a:job, join(a:data, "\n"))
+		endfunc
+		let s:ctrl = jobstart([s:ctrlexe], {
+			\ 'on_stdout': function('s:NvimCtrlRecv'),
+		\ })
+	else
+		let s:ctrl = job_start([s:ctrlexe], {
+			\ 'callback': 's:CtrlRecv',
+			\ 'err_io': 'null',
+			\ 'mode': 'raw',
+		\ })
+	endif
 	let $EDITOR = s:ctrlexe
 endif
