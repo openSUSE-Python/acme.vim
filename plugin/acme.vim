@@ -60,7 +60,7 @@ function AcmeStatusTitle()
 endfunc
 
 function AcmeStatusDir()
-	return s:Name(get(s:cwd, bufnr(), getcwd(0)))
+	return fnamemodify(get(s:cwd, bufnr(), getcwd(0)), ':p:~')
 endfunc
 
 function AcmeStatusName()
