@@ -38,6 +38,17 @@ local function run()
     assert(fn.exists(':T') == 2)
   end)
 
+  check('release before any press is a no-op', function()
+    local win = api.nvim_get_current_win()
+    local cursor = api.nvim_win_get_cursor(win)
+    vim.v.errmsg = ''
+    call('MiddleRelease', 1)
+    call('RightRelease', 1)
+    assert(vim.v.errmsg == '', vim.v.errmsg)
+    assert(api.nvim_get_current_win() == win)
+    assert(vim.deep_equal(api.nvim_win_get_cursor(win), cursor))
+  end)
+
   check('mouse activation avoids normal-mode mouse commands', function()
     vim.cmd('enew')
     api.nvim_buf_set_lines(0, 0, -1, false, { 'not-a-path' })
