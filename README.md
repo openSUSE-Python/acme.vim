@@ -14,6 +14,14 @@ Bringing the spirit of Plan 9 acme to vim.
 	goes to the specified position in the file. This is useful for error
 	messages and other grep-like output.
 
+	In `help` and `checkhealth` buffers, right-clicking a `|tag|` link opens
+	its help topic. HTTP and HTTPS URLs, including bare URLs, open with
+	`xdg-open`. Man-page references such as `printf(3)` open with `man` in
+	a scratch window.
+	External handlers are skipped when their executable is unavailable.
+	Trailing sentence punctuation is trimmed from bare URLs under the cursor.
+	Select the exact URL or enclose it in `<...>` to preserve that punctuation.
+
 	Items can also be opened with the `O` command.
 
 * Execute external commands with the middle mouse button:
@@ -49,8 +57,7 @@ Bringing the spirit of Plan 9 acme to vim.
 * Manage windows with the mouse:
 
 	A window can be closed by middle-clicking its layout box at the
-	beginning of its status bar. The space of the closed window is put into
-	the focused one if they are in the same column.
+	beginning of its status bar.
 
 	A window can be moved by dragging its status bar while holding down the
 	right mouse button. The window is moved above or below the one over
@@ -58,12 +65,20 @@ Bringing the spirit of Plan 9 acme to vim.
 	Otherwise the dragged window is re-opened as a new split of the window
 	under the mouse.
 
-	Right-clicking a status bar resizes the windows above it. The available
-	space is distributed equally among them. But each window is limited to
-	the number of lines in its buffer and any saved space is given to the
-	windows above.
+	Right-clicking the status bar of the top window in a column toggles if
+	it equally shares the premium space at the top of the column with the
+	window below. Right-clicking any other window in a column toggles
+	minimization of that window.
 
 	A window can be moved to a new column by right-clicking its layout box.
+
+* Automatically resize windows:
+
+	All non-minimized windows get a roughly equal amount of space but the
+	top or the top two windows get more space than the windows below them.
+
+	Instead of resizing windows manually it is better to change their order
+	in the column or minimize the less important ones.
 
 * Send text to commands:
 
@@ -108,16 +123,25 @@ make -C ~/.vim/pack/xyb3rt/start/acme.vim/bin avim
 Configuration
 -------------
 
-*acme.vim* supports rudimentary plumbing via the global `g:acme_plumbing`
-variable. Here is an example to get right-clickable URLs, man pages and git
-refs/ranges, that you can add to your `~/.vimrc`:
+The plugin provides `<Plug>(AcmeActivate)` in normal and visual modes. It
+opens the item under the cursor or the selected text. No key is assigned by
+default. For example:
 
+```vim
+nmap gx <Plug>(AcmeActivate)
+xmap gx <Plug>(AcmeActivate)
 ```
+
+Custom plumbing rules can be added through `g:acme_plumbing`. Each entry is
+a very-magic Vim regular expression and a handler. The handler receives the
+`matchlist()` result and returns nonzero when it handled the match. Custom
+rules run before the default URL and man-page handlers, so they can override
+those defaults.
+
+For example, to handle git refs and ranges with `git-plumb`:
+
+```vim
 let g:acme_plumbing = [
-	\ ['<https?\:\/\/(\f|[-.~!*;:@&=+$,/?#%])+', {m ->
-		\ AcmeExec('', 'setsid xdg-open', m[0])}],
-	\ ['(\f{-1,})\s*\((\d\a*)\)', {m ->
-		\ AcmeExec(m[1].'('.m[2].')', 'man', m[2], m[1])}],
 	\ ['(\f|[@{}~^.])+', {m ->
 		\ AcmeExec('git:'.m[0], 'git-plumb', m[0])}]]
 ```
@@ -131,3 +155,11 @@ builtin netrw plugin by adding the following line to your `~/.vimrc`:
 ```
 let g:loaded_netrwPlugin=1
 ```
+
+
+Tests
+-----
+
+Run both editor suites with `make test`, or choose `make test-vim` and
+`make test-nvim`. The Vim tests create their own help tags and external
+handler fixtures. For verbose output, use `VIMFLAGS=-V` or `NVIMFLAGS=-V`.

@@ -24,7 +24,6 @@ struct {
 	int l1;
 	int l2;
 } prompt;
-int scratch;
 
 void opt(const char *arg) {
 	vec_push(&cmd.v, xstrdup(arg));
@@ -45,14 +44,6 @@ void set_(const char *arg, ...) {
 	}
 	va_end(ap);
 	cmd.fixed = vec_len(&cmd.v);
-}
-
-void setscratch(const char *cwd, const char *title) {
-	char **p = vec_dig(&cmd.v, 0, 3);
-	p[0] = xstrdup("scratch");
-	p[1] = xstrdup(cwd);
-	p[2] = xstrdup(title);
-	scratch = 1;
 }
 
 void checktime(void) {
@@ -76,6 +67,14 @@ int run(int outfd) {
 	int fds[3] = {devnull, outfd, 2};
 	vec_push(&cmd.v, NULL);
 	return call(cmd.v, fds);
+}
+
+void scratch(const char *cwd, const char *title) {
+	char **p = vec_dig(&cmd.v, 0, 3);
+	p[0] = xstrdup("scratch");
+	p[1] = xstrdup(cwd);
+	p[2] = xstrdup(title);
+	request((const char **)cmd.v, vec_len(&cmd.v), NULL);
 }
 
 void changed(avim_strv msg) {
@@ -201,10 +200,6 @@ int main(int argc, char *argv[]) {
 		checktime();
 		status();
 		menu(cmds);
-		if (scratch) {
-			request((const char **)cmd.v, vec_len(&cmd.v), NULL);
-			scratch = 0;
-		}
 		block(-1);
 		input();
 		struct cmd *cmd = match(cmds);
@@ -327,8 +322,7 @@ void list_submodules(void) {
 }
 
 void list_tags(void) {
-	const char *cmd[] = {"git", "tag", "--sort=-authordate",
-	                     "--sort=-committerdate", NULL};
+	const char *cmd[] = {"git", "tag", "--sort=-creatordate", NULL};
 	call((char **)cmd, NULL);
 }
 
@@ -342,7 +336,7 @@ void cmd_add(void) {
 
 void cmd_branch(void) {
 	set("git", "branch");
-	hint("< --copy --delete --move --force --set-upstream-to >");
+	hint("< --copy --delete --force --move --set-upstream-to >");
 	if (add(list_branches)) {
 		run(1);
 	}
@@ -376,7 +370,7 @@ void cmd_diff(void) {
 	set("git", "diff");
 	hint("< --cached --stat --submodule=diff HEAD @{u} -- >");
 	if (add(NULL)) {
-		setscratch(cwd, "git:diff");
+		scratch(cwd, "git:diff");
 	}
 }
 
@@ -395,9 +389,11 @@ void cmd_fetch(void) {
 }
 
 void cmd_graph(void) {
-	clear();
-	set("git-graph", "--no-color", "--no-pager", "--style", "ascii");
-	setscratch(cwd, "git:graph");
+	set("git-graph", "--style", "ascii", "--");
+	hint(NULL);
+	if (add(list_branches)) {
+		scratch(cwd, "git:graph");
+	}
 }
 
 void cmd_log(void) {
@@ -405,9 +401,10 @@ void cmd_log(void) {
 	opt("--decorate");
 	opt("--left-right");
 	opt("--cherry-mark");
-	hint("< --first-parent --no-merges --oneline -S HEAD ...@{u} >");
+	hint("< --author= --first-parent --no-merges --oneline -S HEAD "
+	       "...@{u} >");
 	if (add(list_open_files_and_branches)) {
-		setscratch(cwd, "git:log");
+		scratch(cwd, "git:log");
 	}
 }
 
@@ -448,7 +445,8 @@ void cmd_push(void) {
 void cmd_rebase(void) {
 	set("git", "rebase");
 	hint("< --autosquash --interactive --onto --root --update-refs @{u} >",
-	     "< --abort --continue --quit --skip >");
+	     "< --abort --continue --quit --skip --edit-todo "
+	       "--show-current-patch >");
 	if (add(list_branches)) {
 		run(1);
 	}
@@ -480,7 +478,7 @@ void cmd_revert(void) {
 
 void cmd_rm(void) {
 	set("git", "rm", NULL);
-	hint("< --dry-run --force -r >", NULL);
+	hint("< --dry-run --force -r >");
 	if (add(list_files)) {
 		run(devnull);
 	}
@@ -488,7 +486,7 @@ void cmd_rm(void) {
 
 void cmd_stash(void) {
 	set("git", "stash");
-	hint("< --include-untracked pop drop >");
+	hint("< --include-untracked pop --index drop >");
 	if (add(list_stashes)) {
 		run(devnull);
 	}

@@ -208,6 +208,23 @@ void showcompls(json_t *msg) {
 	}
 }
 
+void showhover(json_t *hover) {
+	if (json_is_string(hover)) {
+		printf("%s\n", json_string_value(hover));
+	} else if (json_is_object(hover)) {
+		printf("%s\n", json_string_value(GET(hover, "value")));
+	}
+}
+
+void showhovers(json_t *msg) {
+	json_t *contents = GET(msg, "result", "contents");
+	if (!json_is_array(contents)) {
+		showhover(contents);
+	} else for (size_t i = 0, n = json_array_size(contents); i < n; i++) {
+		showhover(json_array_get(contents, i));
+	}
+}
+
 void showmatches(json_t *msg) {
 	avim_buf data = NULL;
 	avim_strv lines = NULL;
@@ -597,8 +614,6 @@ json_t *capabilities(void) {
 		"general", OBJ(
 			"positionEncodings", ARR(
 				JSON(string, "utf-8"))),
-		"offsetEncoding", ARR(
-			JSON(string, "utf-8")),
 		"textDocument", OBJ(
 			"completion", OBJ(
 				"contextSupport", JSON(true)),
@@ -607,6 +622,8 @@ json_t *capabilities(void) {
 			"documentSymbol", OBJ(
 				"hierarchicalDocumentSymbolSupport",
 					JSON(true)),
+			"hover", OBJ(
+				"contentFormat", JSON(string, "plaintext")),
 			"implementation", JSON(object),
 			"references", JSON(object),
 			"typeDefinition", JSON(object),
@@ -637,13 +654,8 @@ void spawn(char *argv[]) {
 		close(fd0[1]);
 		close(fd1[0]);
 		close(fd1[1]);
-		int fd = open("/dev/null", O_RDWR);
-		if (fd != -1) {
-			dup2(fd, 2);
-			close(fd);
-		}
 		execvp(argv[0], argv);
-		error(EXIT_FAILURE, errno, "exec");
+		error(EXIT_FAILURE, errno, "exec: %s", argv[0]);
 	}
 	close(fd0[1]);
 	close(fd1[0]);
@@ -661,6 +673,9 @@ void spawn(char *argv[]) {
 		"capabilities", capabilities())));
 	vec_free(&uri);
 	server = strbsnm(argv[0]);
+	if (strcmp(server, "pyright-langserver") == 0) {
+		server = "pyright";
+	}
 }
 
 char *fileext(const char *path) {
@@ -687,6 +702,9 @@ void detectserver(avim_strv msg) {
 		if (strcasecmp(ext, "java") == 0) {
 			server = "jdtls";
 		}
+		if (strcasecmp(ext, "py") == 0) {
+			server = "pyright-langserver";
+		}
 	}
 }
 
@@ -696,7 +714,12 @@ void guessinvocation(void) {
 	if (server == NULL) {
 		error(EXIT_FAILURE, 0, "Which server?");
 	}
-	char *argv[] = {(char *)server, NULL};
+	char *argv[] = {(char *)server, NULL, NULL};
+	if (strcmp(server, "clangd") == 0) {
+		argv[1] = "--log=error";
+	} else if (strcmp(server, "pyright-langserver") == 0) {
+		argv[1] = "--stdio";
+	}
 	spawn(argv);
 }
 
@@ -750,6 +773,10 @@ void cmd_def(void) {
 	txtdoc("textDocument/definition", gotomatch, JSON(object));
 }
 
+void cmd_hover(void) {
+	txtdoc("textDocument/hover", showhovers, JSON(object));
+}
+
 void cmd_impl(void) {
 	txtdoc("textDocument/implementation", gotomatch, JSON(object));
 }
@@ -789,6 +816,7 @@ void initmenu(json_t *cap) {
 	addcmd("compl", cmd_compl, cap, "completionProvider");
 	addcmd("decl", cmd_decl, cap, "declarationProvider");
 	addcmd("def", cmd_def, cap, "definitionProvider");
+	addcmd("hover", cmd_hover, cap, "hoverProvider");
 	addcmd("impl", cmd_impl, cap, "implementationProvider");
 	addcmd("all-", cmd_all_refs, cap, "referencesProvider");
 	addcmd("refs", cmd_refs, cap, "referencesProvider");
